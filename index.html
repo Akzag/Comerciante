@@ -228,7 +228,7 @@ function quoteView(){
    <div class="f2">${set('Precio por kWh','kwh')}${set('Consumo de la impresora (W)','w')}</div>
    <div class="f2">${set('Margen de ganancia (%)','mg')}${set('Costo de repuestos','rep')}</div>
    <div class="f2">${set('Vida útil estimada (hrs)','vida')}</div>
-   <small class="mut">Estos valores se guardan en este dispositivo.</small></details>`;
+   <small class="mut">Estos valores se comparten con todos los dispositivos.</small></details>`;
   document.querySelectorAll('[data-j]').forEach(i=>i.oninput=()=>{QJ[i.dataset.j]=i.value;drawQ()});
   document.querySelectorAll('[data-s]').forEach(i=>{
     i.oninput=()=>{QS[i.dataset.s]=i.dataset.s==='t'?i.value:nm(i.value);drawQ()};
@@ -272,36 +272,47 @@ function go(t,keep){
 }
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>go(b.dataset.t));
 
-/* ALMACÉN LOCAL (guarda en este navegador) */
+/* BASE DE DATOS (Supabase) */
+const SB_URL='https://vcgrittsgppnlguqvkls.supabase.co',SB_KEY='sb_publishable_Hlzg_ew7uVYjGEX3zRDhbg_SpWoOtcV';
 const store=(()=>{
-  const KEY='comerciante-calabozo-v1';let data={};
-  try{data=JSON.parse(localStorage.getItem(KEY)||'{}')||{}}catch(e){data={}}
-  const subs={};
-  const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(data))}catch(e){}};
-  const notify=n=>(subs[n]||[]).forEach(f=>f());
-  const coll=n=>data[n]||(data[n]={});
+  const H={apikey:SB_KEY,'Content-Type':'application/json'};if(SB_KEY.startsWith('eyJ'))H.Authorization='Bearer '+SB_KEY;
+  const cache={},sig={},subs={},opts={},errs={};let failed=false,timer=null;
   const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
+  const api=async(path,init={})=>{const r=await fetch(SB_URL+'/rest/v1/docs'+path,{...init,headers:{...H,...(init.headers||{})}});if(!r.ok)throw new Error('http '+r.status);return r};
+  const up=(n,id,data)=>api('',{method:'POST',headers:{Prefer:'resolution=merge-duplicates,return=minimal'},body:JSON.stringify({collection:n,id,data})});
+  async function pull(n){
+    const o=opts[n]||{};let qs='?select=id,data&collection=eq.'+encodeURIComponent(n);
+    if(o.f)qs+='&order=data->>'+o.f+'.'+(o.d==='desc'?'desc':'asc')+(o.l?'&limit='+o.l:'');
+    const rows=await(await api(qs)).json(),s=JSON.stringify(rows);
+    if(s!==sig[n]){sig[n]=s;cache[n]=Object.fromEntries(rows.map(x=>[x.id,x.data]));(subs[n]||[]).forEach(f=>f())}
+  }
+  const after=n=>pull(n).catch(()=>{});
+  async function pullAll(){
+    try{await Promise.all(Object.keys(subs).map(pull));failed=false}
+    catch(e){if(!failed){failed=true;Object.values(errs).forEach(f=>f&&f())}}
+  }
+  function start(){if(timer)return;timer=setInterval(()=>{if(!document.hidden)pullAll()},8000);
+    document.addEventListener('visibilitychange',()=>{if(!document.hidden)pullAll()})}
   return{
     collection(n){return{_o:null,_l:null,
       orderBy(f,d){this._o=[f,d];return this},limit(l){this._l=l;return this},
-      async add(o){const id=uid();coll(n)[id]=o;save();notify(n);return{id}},
-      onSnapshot(cb){const run=()=>{let docs=Object.entries(coll(n)).map(([id,v])=>({id,data:()=>v}));
-        if(this._o){const[f,d]=this._o;docs.sort((a,b)=>(a.data()[f]>b.data()[f]?1:-1)*(d==='desc'?-1:1))}
-        if(this._l)docs=docs.slice(0,this._l);cb({docs})};
-        (subs[n]=subs[n]||[]).push(run);run()}}},
+      async add(o){const id=uid();await up(n,id,o);await after(n);return{id}},
+      onSnapshot(cb,err){
+        opts[n]=this._o?{f:this._o[0],d:this._o[1],l:this._l}:{};errs[n]=err;
+        (subs[n]=subs[n]||[]).push(()=>{let docs=Object.entries(cache[n]||{}).map(([id,v])=>({id,data:()=>v}));
+          const o=opts[n];if(o.f)docs.sort((a,b)=>(a.data()[o.f]>b.data()[o.f]?1:-1)*(o.d==='desc'?-1:1));
+          cb({docs})});
+        start();pull(n).catch(()=>{if(!failed){failed=true;err&&err()}})}}},
     doc(path){const[n,id]=path.split('/');return{
-      async update(o){const c=coll(n);if(c[id]){Object.assign(c[id],o);save();notify(n)}},
-      async set(o){coll(n)[id]={...o};save();notify(n)},
-      async delete(){delete coll(n)[id];save();notify(n)}}},
-    export:()=>JSON.stringify(data),
-    import(j){const d=JSON.parse(j);if(!d||typeof d!=='object')throw 0;data=d;save();Object.keys(subs).forEach(notify)}
+      async update(o){const cur=(cache[n]||{})[id];if(!cur)return;await up(n,id,{...cur,...o});await after(n)},
+      async set(o){await up(n,id,o);await after(n)},
+      async delete(){await api('?collection=eq.'+encodeURIComponent(n)+'&id=eq.'+encodeURIComponent(id),{method:'DELETE'});await after(n)}}},
+    async exportAll(){return JSON.stringify(await(await api('?select=collection,id,data')).json())}
   };
 })();
 function backup(){
-  $('#v').insertAdjacentHTML('beforeend',`<h2>Respaldo</h2><div class="card"><small class="mut" style="margin:0 0 8px">Los datos viven solo en este navegador. Descarga un respaldo de vez en cuando.</small><button id="bx">Descargar respaldo</button> <button class="ghost" id="bi">Cargar respaldo</button><input type="file" id="bf" accept=".json" hidden></div>`);
-  $('#bx').onclick=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([store.export()],{type:'application/json'}));a.download='respaldo-comerciante-'+new Date().toISOString().slice(0,10)+'.json';a.click()};
-  $('#bi').onclick=()=>$('#bf').click();
-  $('#bf').onchange=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{store.import(r.result);toast('Respaldo cargado')}catch(x){toast('Archivo no válido')}};r.readAsText(f)};
+  $('#v').insertAdjacentHTML('beforeend',`<h2>Respaldo</h2><div class="card"><small class="mut" style="margin:0 0 8px">Tus datos están en la nube. Aun así, puedes descargar una copia.</small><button id="bx">Descargar respaldo</button></div>`);
+  $('#bx').onclick=async()=>{try{const t=await store.exportAll();const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([t],{type:'application/json'}));a.download='respaldo-comerciante-'+new Date().toISOString().slice(0,10)+'.json';a.click()}catch(e){toast('No se pudo descargar el respaldo')}};
 }
 
 (async()=>{
